@@ -1,0 +1,121 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Serverless Metadata Extraction using S3, Lambda, DynamoDB, and EventBridge
+
+Parameters:
+  LambdaS3BucketName:
+    Type: String
+    Description: Name of the S3 bucket where Lambda source code is stored
+  LambdaS3Key:
+    Type: String
+    Description: Path to the Lambda deployment package (ZIP) in S3
+
+Resources:
+
+  MetadataBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  MetadataTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: MetadataTable
+      AttributeDefinitions:
+        - AttributeName: FileID
+          AttributeType: S
+      KeySchema:
+        - AttributeName: FileID
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: MetadataLambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AccessS3AndDynamoDB
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:GetItem
+                Resource: !GetAtt MetadataTable.Arn
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub "${MetadataBucket.Arn}/*"
+
+  MetadataLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: ExtractMetadataFunction
+      Handler: index.lambda_handler
+      Runtime: python3.11
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaS3BucketName
+        S3Key: !Ref LambdaS3Key
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref MetadataTable
+
+  LambdaEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: S3PutEventRule
+      Description: Trigger Lambda on S3 PutObject
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - "Object Created"
+        detail:
+          bucket:
+            name:
+              - !Ref MetadataBucket
+      Targets:
+        - Arn: !GetAtt MetadataLambda.Arn
+          Id: LambdaTarget
+      State: ENABLED
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref MetadataLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt LambdaEventRule.Arn
+
+Outputs:
+  S3BucketName:
+    Description: The name of the S3 bucket
+    Value: !Ref MetadataBucket
+
+  DynamoDBTableName:
+    Description: The name of the DynamoDB table
+    Value: !Ref MetadataTable
+
+  LambdaFunctionName:
+    Description: Lambda function that extracts metadata
+    Value: !Ref MetadataLambda
